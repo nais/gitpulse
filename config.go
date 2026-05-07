@@ -13,6 +13,7 @@ type Config struct {
 	Orgs      []string `toml:"orgs"`
 	Repos     []string `toml:"repos"`
 	LocalDirs []string `toml:"local_dirs"`
+	path      string   // resolved path to config file (not serialized)
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -27,6 +28,7 @@ func loadConfig(path string) (*Config, error) {
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	cfg.path = path
 
 	if cfg.Username == "" {
 		return nil, fmt.Errorf("username is required in config")

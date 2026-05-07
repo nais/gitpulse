@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
@@ -86,6 +87,8 @@ type cacheLoadedMsg struct {
 
 type refreshTickMsg time.Time
 type clearAlertsMsg struct{}
+type clearStatusMsg struct{}
+type configUpdatedMsg struct{ err error }
 
 // Model is the root TUI model
 type Model struct {
@@ -109,20 +112,31 @@ type Model struct {
 	alerts      []string  // transient alerts shown on refresh
 	alertExpiry time.Time // when to clear alerts
 	localDirs   []string  // for opening local repos in editor
+	configPath  string    // path to config.toml for live editing
+	inputMode   bool      // true = text input overlay active
+	textInput   textinput.Model
+	statusMsg   string    // transient status message (e.g. "Repo added")
 }
 
-func NewModel(fetchFn FetchFunc, interval time.Duration, localDirs []string) Model {
+func NewModel(fetchFn FetchFunc, interval time.Duration, localDirs []string, configPath string) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
+	ti := textinput.New()
+	ti.Placeholder = "org/repo-name"
+	ti.CharLimit = 100
+	ti.Width = 40
+
 	return Model{
-		fetchFn:   fetchFn,
-		interval:  interval,
-		cacheTTL:  5 * time.Minute,
-		spinner:   s,
-		loading:   true,
-		localDirs: localDirs,
+		fetchFn:    fetchFn,
+		interval:   interval,
+		cacheTTL:   5 * time.Minute,
+		spinner:    s,
+		loading:    true,
+		localDirs:  localDirs,
+		configPath: configPath,
+		textInput:  ti,
 	}
 }
 
@@ -137,6 +151,28 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Text input mode intercepts all keys
+		if m.inputMode {
+			switch msg.String() {
+			case "enter":
+				repo := strings.TrimSpace(m.textInput.Value())
+				m.inputMode = false
+				m.textInput.Reset()
+				if repo != "" && strings.Contains(repo, "/") {
+					return m, m.addRepoToConfig(repo)
+				}
+				return m, nil
+			case "esc":
+				m.inputMode = false
+				m.textInput.Reset()
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.textInput, cmd = m.textInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
@@ -194,6 +230,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.openInEditor()
 		case "g":
 			return m, m.openWithGH()
+		case "a":
+			// Add repo — open text input
+			if m.configPath != "" {
+				m.inputMode = true
+				m.textInput.Focus()
+				return m, textinput.Blink
+			}
+		case "d", "x":
+			// Remove selected repo from config (only on repos panel)
+			if m.focusPanel == 0 && m.configPath != "" && m.data != nil {
+				idx := m.cursor[0]
+				if idx < len(m.data.RepoStatuses) {
+					repo := m.data.RepoStatuses[idx].FullName
+					return m, m.removeRepoFromConfig(repo)
+				}
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -240,6 +292,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case configUpdatedMsg:
+		if msg.err != nil {
+			m.statusMsg = "Error: " + msg.err.Error()
+		} else {
+			m.statusMsg = "Config updated — press r to reload"
+		}
+		// Clear status after 5 seconds
+		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return clearStatusMsg{}
+		})
+
+	case clearStatusMsg:
+		m.statusMsg = ""
+
 	case clearAlertsMsg:
 		m.alerts = nil
 
@@ -285,7 +351,14 @@ func (m Model) View() string {
 		contentHeight = 5
 	}
 
-	if m.data == nil {
+	if m.inputMode {
+		// Show input overlay
+		b.WriteString("\n")
+		b.WriteString(headingStyle.Render("  Add repo: "))
+		b.WriteString(m.textInput.View())
+		b.WriteString("\n")
+		b.WriteString(dimStyleT.Render("  enter:confirm  esc:cancel"))
+	} else if m.data == nil {
 		if m.loading {
 			b.WriteString(m.spinner.View() + " Loading data...")
 		} else {
@@ -553,6 +626,92 @@ func openGH(repo string) tea.Cmd {
 	}
 }
 
+// Config file manipulation
+
+func (m Model) addRepoToConfig(repo string) tea.Cmd {
+	return func() tea.Msg {
+		err := appendRepoToConfig(m.configPath, repo)
+		return configUpdatedMsg{err: err}
+	}
+}
+
+func (m Model) removeRepoFromConfig(repo string) tea.Cmd {
+	return func() tea.Msg {
+		err := removeRepoFromConfig(m.configPath, repo)
+		return configUpdatedMsg{err: err}
+	}
+}
+
+// appendRepoToConfig adds a repo to the repos array in config.toml
+func appendRepoToConfig(path, repo string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+
+	// Check if already present
+	if strings.Contains(content, `"`+repo+`"`) {
+		return fmt.Errorf("%s already in config", repo)
+	}
+
+	// Find the closing bracket of the repos array and insert before it
+	// Look for the last entry in repos = [...] and add after it
+	lines := strings.Split(content, "\n")
+	var result []string
+	inRepos := false
+	inserted := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "repos") && strings.Contains(trimmed, "[") {
+			inRepos = true
+		}
+		if inRepos && !inserted && trimmed == "]" {
+			// Insert new repo before closing bracket
+			result = append(result, fmt.Sprintf(`  "%s",`, repo))
+			inserted = true
+		}
+		if inRepos && trimmed == "]" {
+			inRepos = false
+		}
+		result = append(result, line)
+	}
+
+	if !inserted {
+		return fmt.Errorf("could not find repos array in config")
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(result, "\n")), 0644)
+}
+
+// removeRepoFromConfig removes a repo from the repos array in config.toml
+func removeRepoFromConfig(path, repo string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+
+	lines := strings.Split(content, "\n")
+	var result []string
+	removed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Match the repo entry (with or without trailing comma)
+		if !removed && (trimmed == `"`+repo+`",` || trimmed == `"`+repo+`"`) {
+			removed = true
+			continue
+		}
+		result = append(result, line)
+	}
+
+	if !removed {
+		return fmt.Errorf("%s not found in config", repo)
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(result, "\n")), 0644)
+}
+
 func (m Model) renderTabs() string {
 	names := []string{"Repos", "My PRs", "Pushes", "Local"}
 	var parts []string
@@ -622,6 +781,11 @@ func (m Model) renderFooter() string {
 		return strings.Join(parts, "  ")
 	}
 
+	// Status message (config updates)
+	if m.statusMsg != "" {
+		parts = append(parts, successStyleT.Render("● "+m.statusMsg))
+	}
+
 	if m.loading {
 		parts = append(parts, m.spinner.View()+" Fetching...")
 	} else if m.isStale {
@@ -635,9 +799,9 @@ func (m Model) renderFooter() string {
 	}
 
 	if m.expanded {
-		parts = append(parts, dimStyleT.Render("esc:back  j/k:select  J/K:panel  o:open  e:editor  g:gh  r:refresh  q:quit"))
+		parts = append(parts, dimStyleT.Render("esc:back  j/k:select  J/K:panel  o:open  e:editor  g:gh  a:add  d:remove  r:refresh  q:quit"))
 	} else {
-		parts = append(parts, dimStyleT.Render("j/k:select  J/K:panel  enter:expand  o:open  e:editor  r:refresh  q:quit"))
+		parts = append(parts, dimStyleT.Render("j/k:select  J/K:panel  enter:expand  o:open  e:editor  a:add  d:remove  r:refresh  q:quit"))
 	}
 
 	return strings.Join(parts, "  ")

@@ -78,7 +78,7 @@ func runTUI(cfg *Config, client *GitHubClient) error {
 	}
 
 	interval := time.Duration(watchInterval) * time.Second
-	model := tui.NewModel(fetchFn, interval, cfg.LocalDirs)
+	model := tui.NewModel(fetchFn, interval, cfg.LocalDirs, cfg.path)
 
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
