@@ -2,6 +2,8 @@
 
 A terminal dashboard for monitoring your GitHub repos across multiple orgs.
 
+![gitpulse demo](docs/demo.png)
+
 ## Features
 
 - **Repo health** — Last commit, CI status, open PRs for your configured repos
