@@ -1,0 +1,34 @@
+[tools]
+go = "latest"
+
+[tasks.build]
+description = "Build the binary"
+run = "go build -o gitpulse ."
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./... -v"
+
+[tasks.run]
+description = "Build and run"
+run = "go build -o gitpulse . && ./gitpulse"
+
+[tasks.watch]
+description = "Run in watch mode"
+run = "go build -o gitpulse . && ./gitpulse --watch"
+
+[tasks.json]
+description = "Run with JSON output"
+run = "go build -o gitpulse . && ./gitpulse --json"
+
+[tasks.lint]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.clean]
+description = "Remove built binary"
+run = "rm -f gitpulse"
+
+[tasks.install]
+description = "Build and install gitpulse to GOPATH/bin"
+run = "go build -o $(go env GOPATH)/bin/gitpulse ."

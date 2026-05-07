@@ -1,0 +1,12 @@
+username = "your-github-username"
+orgs = ["your-org"]
+
+repos = [
+  "your-org/repo-one",
+  "your-org/repo-two",
+]
+
+# Directories to scan for local git repos with dirty/unpushed state
+local_dirs = [
+  "~/src/github.com/your-org",
+]
